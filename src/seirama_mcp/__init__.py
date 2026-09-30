@@ -1,0 +1,1 @@
+"""MCP pencarian dokumen SEIRAMA."""

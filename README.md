@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # MCP-Documents
 
 
@@ -91,3 +92,21 @@ For open source projects, say how it is licensed.
 
 ## Project status
 If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+=======
+# SEIRAMA Document MCP
+
+MCP server terpisah untuk pencarian semantik dan pengambilan isi PDF pada folder `Docs`, menggunakan Qdrant, FastEmbed, Docling, OCR, dan SQLite metadata seperti implementasi lama.
+
+## Menjalankan
+
+```powershell
+pip install -e .
+python document_server.py
+```
+
+Endpoint: `http://127.0.0.1:8001/mcp`
+
+Tools: `document_search`, `document_get`, `document_index`.
+
+Konfigurasi utama: `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_MODEL`, `DOCUMENT_PARSER` (`docling` atau `pypdf`), dan `DOCUMENT_OCR`.
+>>>>>>> b4f021b (Add initial project structure with configuration, document handling, and server setup)
