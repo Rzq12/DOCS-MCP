@@ -3,9 +3,6 @@ import re
 from .config import settings
 from .codegraph import edge, node, connection
 
-def setup(db):
-    db.executescript("CREATE TABLE IF NOT EXISTS documents (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL, category TEXT NOT NULL, filename TEXT NOT NULL, checksum TEXT NOT NULL, page_count INTEGER NOT NULL DEFAULT 0, indexed INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS document_pages (id INTEGER PRIMARY KEY, document_id INTEGER NOT NULL, page_number INTEGER NOT NULL, text TEXT NOT NULL, UNIQUE(document_id, page_number)); CREATE TABLE IF NOT EXISTS document_chunks (id INTEGER PRIMARY KEY, document_id INTEGER NOT NULL, page_number INTEGER NOT NULL, chunk_index INTEGER NOT NULL, text TEXT NOT NULL, UNIQUE(document_id, page_number, chunk_index));")
-
 def category(path):
     try: return path.relative_to(settings.docs_root).parts[0]
     except (ValueError, IndexError): return "Lainnya"
@@ -49,24 +46,25 @@ def qdrant():
     return client,embedder
 
 def index(force=False):
-    db=connection(); setup(db); pdfs=sorted(settings.docs_root.rglob("*.pdf")) if settings.docs_root.exists() else []
-    if not pdfs: db.close(); return {"indexed":0,"skipped":0,"pdf_count":0}
+    pdfs=sorted(settings.docs_root.rglob("*.pdf")) if settings.docs_root.exists() else []
+    if not pdfs: return {"indexed":0,"skipped":0,"pdf_count":0}
     client,embedder=qdrant(); indexed=skipped=0
     from qdrant_client.models import FieldCondition, Filter, MatchValue, PointStruct
     for path in pdfs:
-        relative=str(path.relative_to(settings.docs_root.parent)); checksum=hashlib.sha256(path.read_bytes()).hexdigest(); old=db.execute("SELECT id,checksum,indexed FROM documents WHERE path=?",(relative,)).fetchone()
-        if old and old[1]==checksum and old[2] and not force: skipped+=1; continue
-        if old: document_id=old[0]; db.execute("DELETE FROM document_pages WHERE document_id=?",(document_id,)); db.execute("DELETE FROM document_chunks WHERE document_id=?",(document_id,)); db.execute("UPDATE documents SET checksum=?,indexed=0 WHERE id=?",(checksum,document_id))
-        else: document_id=db.execute("INSERT INTO documents(path,category,filename,checksum) VALUES(?,?,?,?)",(relative,category(path),path.name,checksum)).lastrowid
+        relative=str(path.relative_to(settings.docs_root.parent)).replace("\\", "/"); checksum=hashlib.sha256(path.read_bytes()).hexdigest()
+        path_filter=Filter(must=[FieldCondition(key="path", match=MatchValue(value=relative))])
+        existing=client.scroll(settings.qdrant_collection, scroll_filter=path_filter, limit=1, with_payload=True)[0]
+        if existing and existing[0].payload.get("checksum")==checksum and not force: skipped+=1; continue
+        client.delete(collection_name=settings.qdrant_collection, points_selector=path_filter)
         pending=[]; pages=parse_pdf(path)
         for number,page_text in pages:
-            text=re.sub(r"(?<!\n)-\n(?=\w)","",page_text or ""); text=re.sub(r"[ \t]+"," ",text).strip(); db.execute("INSERT INTO document_pages(document_id,page_number,text) VALUES(?,?,?)",(document_id,number,text))
+            text=re.sub(r"(?<!\n)-\n(?=\w)","",page_text or ""); text=re.sub(r"[ \t]+"," ",text).strip()
             for chunk_index,text_chunk in enumerate(chunks(text)):
-                chunk_id=db.execute("INSERT INTO document_chunks(document_id,page_number,chunk_index,text) VALUES(?,?,?,?)",(document_id,number,chunk_index,text_chunk)).lastrowid; pending.append((int(chunk_id),text_chunk,number))
+                point_id=int(hashlib.sha256(f"{relative}:{number}:{chunk_index}".encode()).hexdigest()[:15],16); pending.append((point_id,text_chunk,number,chunk_index))
         if pending:
-            vectors=list(embedder.embed([x[1] for x in pending])); client.upsert(collection_name=settings.qdrant_collection,points=[PointStruct(id=i,vector=v.tolist(),payload={"text":t,"path":relative,"category":category(path),"page_number":n,"chunk_id":i}) for (i,t,n),v in zip(pending,vectors)])
-        db.execute("UPDATE documents SET page_count=?,indexed=1 WHERE id=?",(len(pages),document_id)); edge(db,node(db,"document",path.name,relative),"HAS_CATEGORY",node(db,"document_category",category(path))); db.commit(); indexed+=1
-    db.close(); return {"indexed":indexed,"skipped":skipped,"pdf_count":len(pdfs)}
+            vectors=list(embedder.embed([x[1] for x in pending])); client.upsert(collection_name=settings.qdrant_collection,points=[PointStruct(id=i,vector=v.tolist(),payload={"text":t,"path":relative,"filename":path.name,"category":category(path),"page_number":n,"chunk_index":ci,"checksum":checksum,"page_count":len(pages),"indexed":True}) for (i,t,n,ci),v in zip(pending,vectors)])
+        indexed+=1
+    return {"indexed":indexed,"skipped":skipped,"pdf_count":len(pdfs),"storage":"qdrant"}
 
 def search(query,category_filter,limit):
     client,embedder=qdrant(); vector=list(embedder.embed([query]))[0].tolist(); query_filter=None
@@ -77,8 +75,38 @@ def search(query,category_filter,limit):
     return [{"score":p.score,**(p.payload or {})} for p in points]
 
 def get(path,page_number=None):
-    db=connection(); setup(db); doc=db.execute("SELECT id,path,category,filename,page_count FROM documents WHERE path=?",(path,)).fetchone()
-    if doc is None: db.close(); return {"found":False,"path":path,"pages":[]}
-    sql="SELECT page_number,text FROM document_pages WHERE document_id=?"; params=[doc[0]]
-    if page_number is not None: sql+=" AND page_number=?"; params.append(page_number)
-    pages=db.execute(sql+" ORDER BY page_number",params).fetchall(); db.close(); return {"found":True,"document":dict(doc),"pages":[dict(p) for p in pages]}
+    normalized=path.replace("\\", "/").lstrip("./")
+    client,_=qdrant(); from qdrant_client.models import FieldCondition, Filter, MatchValue
+    conditions=[FieldCondition(key="path",match=MatchValue(value=normalized))]
+    if page_number is not None: conditions.append(FieldCondition(key="page_number",match=MatchValue(value=page_number)))
+    points=client.scroll(settings.qdrant_collection,scroll_filter=Filter(must=conditions),limit=10000,with_payload=True)[0]
+    if not points:
+        requested_name=normalized.rsplit("/",1)[-1].casefold()
+        candidates=client.scroll(settings.qdrant_collection,limit=10000,with_payload=True)[0]
+        points=[point for point in candidates if (point.payload or {}).get("filename","").casefold()==requested_name or (point.payload or {}).get("path","").casefold()==normalized.casefold()]
+        if page_number is not None: points=[point for point in points if (point.payload or {}).get("page_number")==page_number]
+    if not points: return {"found":False,"path":path,"pages":[],"storage":"qdrant"}
+    payloads=[p.payload or {} for p in points]; first=payloads[0]
+    pages={}
+    for item in sorted(payloads,key=lambda value:(value.get("page_number",0),value.get("chunk_index",0))):
+        number=item.get("page_number"); pages[number]=(pages.get(number,"") + "\n\n" + item.get("text","")).strip()
+    return {"found":True,"storage":"qdrant","document":{key:first.get(key) for key in ("path","filename","category","page_count","checksum")},"pages":[{"page_number":number,"text":text} for number,text in sorted(pages.items())]}
+
+def list_documents(category_filter=None):
+    client,_=qdrant(); from qdrant_client.models import FieldCondition, Filter, MatchValue
+    scroll_filter=Filter(must=[FieldCondition(key="category",match=MatchValue(value=category_filter))]) if category_filter else None
+    points=client.scroll(settings.qdrant_collection,scroll_filter=scroll_filter,limit=10000,with_payload=True)[0]
+    unique={item.get("path"):item for item in (p.payload or {} for p in points) if item.get("path")}
+    return {"count":len(unique),"storage":"qdrant","documents":[{key:item.get(key) for key in ("path","filename","category","page_count","checksum","indexed")} for item in sorted(unique.values(),key=lambda x:(x.get("category",""),x.get("filename","")))]}
+
+def categories():
+    documents=list_documents()["documents"]; counts={}
+    for item in documents: counts[item["category"]]=counts.get(item["category"],0)+1
+    return {"count":len(counts),"storage":"qdrant","categories":[{"category":key,"count":value} for key,value in sorted(counts.items())]}
+
+def text_search(query, category_filter=None, limit=30):
+    client,_=qdrant(); from qdrant_client.models import FieldCondition, Filter, MatchValue
+    scroll_filter=Filter(must=[FieldCondition(key="category",match=MatchValue(value=category_filter))]) if category_filter else None
+    points=client.scroll(settings.qdrant_collection,scroll_filter=scroll_filter,limit=10000,with_payload=True)[0]
+    terms=[term for term in re.findall(r"[\w-]+",query.lower()) if len(term)>2]
+    return [{**(p.payload or {}),"storage":"qdrant"} for p in points if any(term in (p.payload or {}).get("text","").lower() for term in terms)][:limit]

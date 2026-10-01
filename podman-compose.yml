@@ -8,11 +8,6 @@ services:
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
-    healthcheck:
-      test: ["CMD-SHELL", "wget --spider -q http://localhost:6333/healthz || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   mcp:
     build:
@@ -23,13 +18,15 @@ services:
     restart: unless-stopped
     depends_on:
       qdrant:
-        condition: service_healthy
+        condition: service_started
     ports:
       - "8001:8001"
     env_file:
       - .env
     environment:
       QDRANT_URL: http://qdrant:6333
+      DOCS_ROOT: /app/Docs
+      CODEGRAPH_DB: /app/.seirama-data/.codegraph.sqlite
     volumes:
       - ./Docs:/app/Docs:ro
       - mcp_data:/app/.seirama-data

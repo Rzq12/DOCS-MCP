@@ -11,8 +11,8 @@ load_dotenv(PROJECT_ROOT / ".env")
 @dataclass(frozen=True)
 class Settings:
     project_root: Path = PROJECT_ROOT
-    docs_root: Path = PROJECT_ROOT / "Docs"
-    codegraph_db: Path = PROJECT_ROOT / ".codegraph.sqlite"
+    docs_root: Path = Path(os.getenv("DOCS_ROOT", str(PROJECT_ROOT / "Docs")))
+    codegraph_db: Path = Path(os.getenv("CODEGRAPH_DB", str(PROJECT_ROOT / ".codegraph.sqlite")))
     qdrant_url: str = os.getenv("QDRANT_URL", "http://localhost:6333")
     qdrant_collection: str = os.getenv("QDRANT_COLLECTION", "seirama_documents")
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
