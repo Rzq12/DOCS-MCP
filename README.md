@@ -113,6 +113,25 @@ Konfigurasi utama: `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_MODEL`, `DOCUME
 >>>>>>> b4f021b (Add initial project structure with configuration, document handling, and server setup)
 =======
 
+## Menjalankan MCP dan Qdrant di VPS dengan Podman
+
+Siapkan folder PDF di `Docs/`, lalu buat file `.env` dari `.env.example`. Jalankan:
+
+```bash
+podman compose -f podman-compose.yml up -d --build
+podman compose -f podman-compose.yml ps
+```
+
+Endpoint MCP tersedia di `http://SERVER_IP:8001/mcp`. Port `6333` hanya diperlukan
+untuk administrasi Qdrant; untuk VPS production, batasi aksesnya dengan firewall.
+
+Untuk melihat log:
+
+```bash
+podman compose -f podman-compose.yml logs -f mcp
+podman compose -f podman-compose.yml logs -f qdrant
+```
+
 ## Menjalankan Qdrant dengan Podman
 
 ```powershell

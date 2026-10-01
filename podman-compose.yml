@@ -14,5 +14,26 @@ services:
       timeout: 5s
       retries: 5
 
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: seirama-document-mcp:latest
+    container_name: seirama-mcp
+    restart: unless-stopped
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    environment:
+      QDRANT_URL: http://qdrant:6333
+    volumes:
+      - ./Docs:/app/Docs:ro
+      - mcp_data:/app/.seirama-data
+
 volumes:
   qdrant_data:
+  mcp_data:
