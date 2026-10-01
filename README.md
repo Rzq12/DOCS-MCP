@@ -109,4 +109,41 @@ Endpoint: `http://127.0.0.1:8001/mcp`
 Tools: `document_search`, `document_get`, `document_index`.
 
 Konfigurasi utama: `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_MODEL`, `DOCUMENT_PARSER` (`docling` atau `pypdf`), dan `DOCUMENT_OCR`.
+<<<<<<< HEAD
 >>>>>>> b4f021b (Add initial project structure with configuration, document handling, and server setup)
+=======
+
+## Menjalankan Qdrant dengan Podman
+
+```powershell
+podman compose -f podman-compose.yml up -d
+podman compose -f podman-compose.yml ps
+```
+
+Qdrant tersedia di `http://localhost:6333`. Untuk menghentikan layanan:
+
+```powershell
+podman compose -f podman-compose.yml down
+```
+
+### Restore data Qdrant ke Podman
+
+Gunakan arsip hasil export, misalnya `qdrant_data_old_20261001-072258.tar.gz`.
+Command berikut membuat backup volume target terlebih dahulu, lalu me-restore arsip:
+
+```bash
+archive="qdrant_data_old_20261001-072258.tar.gz"
+volume="document-mcp_qdrant_data"
+
+podman compose -f podman-compose.yml stop
+podman run --rm -v "${volume}:/source:ro" -v "$(pwd):/backup" docker.io/alpine:latest \
+	sh -c "tar -czf /backup/qdrant_data_before_restore.tar.gz -C /source ."
+podman run --rm -v "${volume}:/target" -v "$(pwd):/backup:ro" docker.io/alpine:latest \
+	sh -c "rm -rf /target/* /target/.[!.]* /target/..?* 2>/dev/null || true; tar -xzf /backup/${archive} -C /target"
+podman compose -f podman-compose.yml up -d
+curl http://localhost:6333/collections
+```
+
+Jika volume dibuat oleh project name Podman yang berbeda, lihat nama volume
+dengan `podman volume ls`, lalu sesuaikan nilai `$volume`.
+>>>>>>> 336fc17 (Add Podman Compose configuration for Qdrant service and update README)
