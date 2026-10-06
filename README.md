@@ -11,7 +11,7 @@ python document_server.py
 
 Endpoint: `http://127.0.0.1:8001/mcp`
 
-Tools: `document_search`, `document_get`, `document_index`.
+Tools: `document_search`, `document_get`, `document_index`, `document_list`, and `document_text_search`. `document_list` tanpa kategori mengembalikan jumlah dokumen per kategori; isi `category` untuk daftar dokumen dengan pagination `limit` dan `offset`.
 
 Konfigurasi utama: `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_MODEL`, `DOCUMENT_PARSER` (`docling` atau `pypdf`), dan `DOCUMENT_OCR`.
 

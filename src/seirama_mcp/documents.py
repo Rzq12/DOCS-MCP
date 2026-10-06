@@ -3,6 +3,17 @@ import re
 from .config import settings
 from .codegraph import edge, node, connection
 
+SCORE_THRESHOLD = 0.3
+from fastembed import TextEmbedding
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams
+
+client = QdrantClient(url=settings.qdrant_url)
+embedder = TextEmbedding(model_name=settings.embedding_model)
+size = len(list(embedder.embed(["dimension probe"]))[0])
+if not client.collection_exists(settings.qdrant_collection):
+    client.create_collection(collection_name=settings.qdrant_collection, vectors_config=VectorParams(size=size, distance=Distance.COSINE))
+
 def category(path):
     try: return path.relative_to(settings.docs_root).parts[0]
     except (ValueError, IndexError): return "Lainnya"
@@ -38,12 +49,7 @@ def parse_pdf(path):
     return [(n,"\n\n".join(parts)) for n,parts in sorted(page_text.items())] or [(1,document.export_to_markdown())]
 
 def qdrant():
-    from fastembed import TextEmbedding
-    from qdrant_client import QdrantClient
-    from qdrant_client.models import Distance, VectorParams
-    client=QdrantClient(url=settings.qdrant_url); embedder=TextEmbedding(model_name=settings.embedding_model); size=len(list(embedder.embed(["dimension probe"]))[0])
-    if not client.collection_exists(settings.qdrant_collection): client.create_collection(collection_name=settings.qdrant_collection,vectors_config=VectorParams(size=size,distance=Distance.COSINE))
-    return client,embedder
+    return client, embedder
 
 def index(force=False):
     pdfs=sorted(settings.docs_root.rglob("*.pdf")) if settings.docs_root.exists() else []
@@ -71,42 +77,49 @@ def search(query,category_filter,limit):
     if category_filter:
         from qdrant_client.models import FieldCondition, Filter, MatchValue
         query_filter=Filter(must=[FieldCondition(key="category",match=MatchValue(value=category_filter))])
-    points=client.query_points(collection_name=settings.qdrant_collection,query=vector,query_filter=query_filter,limit=limit,with_payload=True).points
-    return [{"score":p.score,**(p.payload or {})} for p in points]
+    points=client.query_points(collection_name=settings.qdrant_collection,query=vector,query_filter=query_filter,limit=limit,score_threshold=SCORE_THRESHOLD,with_payload=True).points
+    return [{"score":p.score,"filename":p.payload.get("filename"),"category":p.payload.get("category"),"page_number":p.payload.get("page_number"),"text":p.payload.get("text","")[:500]} for p in points]
 
-def get(path,page_number=None):
+def get(path,page_number):
     normalized=path.replace("\\", "/").lstrip("./")
     client,_=qdrant(); from qdrant_client.models import FieldCondition, Filter, MatchValue
     conditions=[FieldCondition(key="path",match=MatchValue(value=normalized))]
-    if page_number is not None: conditions.append(FieldCondition(key="page_number",match=MatchValue(value=page_number)))
+    conditions.append(FieldCondition(key="page_number",match=MatchValue(value=page_number)))
     points=client.scroll(settings.qdrant_collection,scroll_filter=Filter(must=conditions),limit=10000,with_payload=True)[0]
-    if not points:
-        requested_name=normalized.rsplit("/",1)[-1].casefold()
-        candidates=client.scroll(settings.qdrant_collection,limit=10000,with_payload=True)[0]
-        points=[point for point in candidates if (point.payload or {}).get("filename","").casefold()==requested_name or (point.payload or {}).get("path","").casefold()==normalized.casefold()]
-        if page_number is not None: points=[point for point in points if (point.payload or {}).get("page_number")==page_number]
-    if not points: return {"found":False,"path":path,"pages":[],"storage":"qdrant"}
-    payloads=[p.payload or {} for p in points]; first=payloads[0]
-    pages={}
-    for item in sorted(payloads,key=lambda value:(value.get("page_number",0),value.get("chunk_index",0))):
-        number=item.get("page_number"); pages[number]=(pages.get(number,"") + "\n\n" + item.get("text","")).strip()
-    return {"found":True,"storage":"qdrant","document":{key:first.get(key) for key in ("path","filename","category","page_count","checksum")},"pages":[{"page_number":number,"text":text} for number,text in sorted(pages.items())]}
+    if not points: return {"found":False,"document":None}
+    payloads=[p.payload or {} for p in points]
+    text="\n\n".join(item.get("text","") for item in sorted(payloads,key=lambda value:value.get("chunk_index",0)))
+    first=payloads[0]
+    return {"found":True,"document":{"filename":first.get("filename"),"page_number":page_number,"text":text}}
 
-def list_documents(category_filter=None):
+def list_documents(category_filter=None, limit=50, offset=0):
     client,_=qdrant(); from qdrant_client.models import FieldCondition, Filter, MatchValue
     scroll_filter=Filter(must=[FieldCondition(key="category",match=MatchValue(value=category_filter))]) if category_filter else None
     points=client.scroll(settings.qdrant_collection,scroll_filter=scroll_filter,limit=10000,with_payload=True)[0]
     unique={item.get("path"):item for item in (p.payload or {} for p in points) if item.get("path")}
-    return {"count":len(unique),"storage":"qdrant","documents":[{key:item.get(key) for key in ("path","filename","category","page_count","checksum","indexed")} for item in sorted(unique.values(),key=lambda x:(x.get("category",""),x.get("filename","")))]}
+    ordered=sorted(unique.values(),key=lambda x:(x.get("category",""),x.get("filename","")))
+    if not category_filter:
+        counts={}
+        for item in ordered: counts[item.get("category","Lainnya")]=counts.get(item.get("category","Lainnya"),0)+1
+        return {"count":len(counts),"categories":[{"category":key,"count":value} for key,value in sorted(counts.items())]}
+    selected=ordered[offset:offset+limit]
+    return {"count":len(ordered),"documents":[{"path":item.get("path"),"page_count":item.get("page_count")} for item in selected]}
 
-def categories():
-    documents=list_documents()["documents"]; counts={}
-    for item in documents: counts[item["category"]]=counts.get(item["category"],0)+1
-    return {"count":len(counts),"storage":"qdrant","categories":[{"category":key,"count":value} for key,value in sorted(counts.items())]}
-
-def text_search(query, category_filter=None, limit=30):
+def text_search(query, category_filter=None, limit=5):
     client,_=qdrant(); from qdrant_client.models import FieldCondition, Filter, MatchValue
     scroll_filter=Filter(must=[FieldCondition(key="category",match=MatchValue(value=category_filter))]) if category_filter else None
     points=client.scroll(settings.qdrant_collection,scroll_filter=scroll_filter,limit=10000,with_payload=True)[0]
     terms=[term for term in re.findall(r"[\w-]+",query.lower()) if len(term)>2]
-    return [{**(p.payload or {}),"storage":"qdrant"} for p in points if any(term in (p.payload or {}).get("text","").lower() for term in terms)][:limit]
+    results=[]
+    for point in points:
+        payload=point.payload or {}
+        text=payload.get("text","")
+        lower=text.lower()
+        match=next(((lower.find(term),term) for term in terms if lower.find(term)>=0),None)
+        if match is None: continue
+        position,term=match
+        start=max(0,position-75)
+        end=min(len(text),position+len(term)+75)
+        results.append({"filename":payload.get("filename"),"page_number":payload.get("page_number"),"snippet":text[start:end]})
+        if len(results)>=limit: break
+    return results
